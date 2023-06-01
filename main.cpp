@@ -69,8 +69,8 @@ int main() {
   testcases *Test = new testcases{};
 
   fstream file;
-  file.open("feasibility_testcases.txt",ios::in); //open a file to perform read operation using file object
-  if (file.is_open()){   //checking whether the file is open
+  file.open("feasibility_testcases.txt",ios::in); 
+  if (file.is_open()){
     string elem;
     int nVars = -1;
     int nIneqs = -1;
