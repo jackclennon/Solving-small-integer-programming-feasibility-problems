@@ -7,7 +7,6 @@
 using namespace std;
 
 struct IP {
-  int id;
   int nVars;
   int nIneqs;
   int nEqs;
@@ -35,8 +34,7 @@ vector<string> split(string str) {
   return strings;
 }
 
-struct IP* createIP(struct IP *ip, int id, int nV, vector<string> in, vector<string> eq) {
-  ip->id = id;
+struct IP* createIP(struct IP *ip, int nV, vector<string> in, vector<string> eq) {
   ip->nVars = nV;
   ip->nIneqs = in.size();
   ip->nEqs = eq.size();
@@ -74,7 +72,6 @@ int main() {
   file.open("feasibility_testcases.txt",ios::in); //open a file to perform read operation using file object
   if (file.is_open()){   //checking whether the file is open
     string elem;
-    int id = 0;
     int nVars = -1;
     int nIneqs = -1;
     vector<string> ineqs;
@@ -82,7 +79,7 @@ int main() {
     vector<string> eqs;
     bool readIneqs = false;
 
-    while(getline(file, elem) && id < 100) {
+    while(getline(file, elem) && Test->recent < 100) {
       stringstream ss(elem);
       if (nVars < 0) {
         ss >> nVars;
@@ -102,10 +99,9 @@ int main() {
         nEqs--;
 
         IP *ip = new IP{};
-        ip = createIP(ip, id, nVars, ineqs, eqs);
+        ip = createIP(ip, nVars, ineqs, eqs);
         saveTestCase(Test, ip);
 
-        id++;
         nVars = -1;
         nIneqs = -1;
         nEqs = -1;
