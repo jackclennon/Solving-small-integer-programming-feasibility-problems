@@ -1,11 +1,13 @@
-
 #include "Highs.h"
 #include "lp_data/HighsModelUtils.h"
+#include <vector>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream> 
 #include <tuple>
 #include <bitset>
+#include <algorithm>
 
 using namespace std;
 
@@ -86,8 +88,8 @@ struct IP {
   int nVars;
   int nIneqs;
   int nEqs;
-  vector<vector<HighsInt>> ineqs;
-  vector<vector<HighsInt>> eqs;
+  vector<vector<int>> ineqs;
+  vector<vector<int>> eqs;
   int presolveRows;
   int presolveCols;
   size_t hash_code;
@@ -139,7 +141,7 @@ struct tableauStruct {
 void divide(tableauStruct *tab, long double a, int rowInd) {
   if (a == 0) {
     cin.clear();
-    cout << "\na == 0";
+    //cout << "\na == 0";
     cin.clear();
     cin.get();
   }
@@ -162,12 +164,20 @@ void fraction(tableauStruct *tab, long double num, long double den, int rowInd) 
   divide(tab, num, rowInd);
 }
 
-struct postsolveStep {
-  string type;
+enum presolveType {EmptyColumn=0, RowSingleton=1, ColumnSingleton=2};
+
+struct presolveStep {
+  presolveType type;
   vector<long double> row;
   long double b;
   bool eq; //true means equality, false means inequality
+  long double x; //value of the x component that has been removed
   int columnIndex;
+};
+
+struct problem {
+  bool infeasible = false;
+  vector<presolveStep> presolveStack;
 };
 
 
@@ -285,7 +295,7 @@ vector<vector<long double>> findMinus(vector<vector<long double>> A) {
   return A;
 }
 
-vector<vector<HighsInt>> findMinus(vector<vector<HighsInt>> A) {
+vector<vector<int>> findMinus(vector<vector<int>> A) {
   for (int row=0; row<A.size(); row++)
     for (int col=0; col<A[0].size(); col++) 
       A[row][col] = -A[row][col];
@@ -344,7 +354,7 @@ void createIP(struct IP *ip, int nV, vector<string> in, vector<string> eq) {
   ip->nEqs = eq.size();
 
   for (int i = 0; i < in.size(); i++) {
-    vector<HighsInt> constr;
+    vector<int> constr;
     vector<string> strConstr = split(in[i]);
     for (int j = 0; j < strConstr.size(); j++)
       constr.push_back(stoll(strConstr[j]));
@@ -366,167 +376,6 @@ void saveTestCase(IP *ip) {
   cases[recent] = *ip;
   recent++;
 }
-
-HighsModel makeModel(IP *tc, bool isInt) {
-  //make a highs model with A, b taken from cases[id]
-  HighsModel model;
-  model.lp_.num_col_ = tc->nVars;
-  model.lp_.num_row_ = tc->nIneqs + tc->nEqs;
-  if (isInt)
-    model.lp_.integrality_ = vector<HighsVarType> (tc->nVars, HighsVarType::kInteger);
-
-  vector<double> lb;
-  vector<double> ub;
-  for (auto row: tc->ineqs) {
-    ub.push_back(-(double)row[0]);
-    lb.push_back(-1.0e30);
-  }
-  for (auto row: tc->eqs) {
-    lb.push_back(-(double)row[0]);
-    ub.push_back(-(double)row[0]);
-  }
-
-  cout << "\nlb: " << lb;
-  cout << "\nub: " << ub;
-
-  cout << "\nIneqs\n";
-  for (auto row: tc->ineqs)
-    cout << row;
-
-  model.lp_.col_lower_ = vector<double> (tc->nVars, -1.0e30);
-  model.lp_.col_upper_ = vector<double> (tc->nVars, 1.0e30);
-  model.lp_.col_cost_ = vector<double> (tc->nVars, 0.0);
-  model.lp_.row_lower_ = lb;
-  model.lp_.row_upper_ = ub;
-
-  //count the number of non-zeros in the matrix A
-  int nonZeros = 0;
-  for (auto row: tc->ineqs){
-    int k = 0;
-    for (auto e: row) {
-      //skip the first column because it is the constant value already taken across to the lower bound
-      if (k > 0) {
-        if (e != 0)
-          nonZeros++;
-      }
-      k++;
-    }
-  }
-  for (auto row: tc->eqs){
-    int k = 0;
-    for (auto e: row) {
-      //skip the first column because it is the constant value already taken across to the lower bound
-      if (k > 0) {
-        if (e != 0)
-          nonZeros++;
-      }
-      k++;
-    }
-  }
-
-  //index each non zero element along and down columns
-  vector<int> start;
-  vector<int> index;
-  vector<double> values;
-
-  int c = 0;
-  for (int col = 1; col <= tc->nVars; col++) {
-    int cN = true;
-    for (int row = 0; row < tc->nIneqs; row++)
-      if (tc->ineqs[row][col] != 0) {
-        index.push_back(row);
-        values.push_back((long double)tc->ineqs[row][col]);
-        if (cN) {
-          start.push_back(c);
-          cN = false;
-        }
-        c++;
-      }
-    for (int row = 0; row < tc->nEqs; row++)
-      if (tc->eqs[row][col] != 0) {
-        index.push_back(row+tc->nIneqs);
-        values.push_back((double)tc->eqs[row][col]);
-        if (cN) {
-          start.push_back(c);
-          cN = false;
-        }
-        c++;
-      }
-    if (cN)
-      start.push_back(c);
-  }
-
-  start.push_back(nonZeros);
-
-  model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
-  model.lp_.a_matrix_.start_ = start;
-  model.lp_.a_matrix_.index_ = index;
-  model.lp_.a_matrix_.value_ = values;
-
-  return model;
-}
-
-int getPresolve(IP *ip, bool isInt) {
-  //presolve the model using highs
-  HighsModel model = makeModel(ip, isInt);
-  Highs highs;
-  highs.passModel(model);
-  highs.setOptionValue("presolve_rule_logging", true);
-  //11111111111111 = 0x3FFF disallows all
-  //11001010101011
-  //11110111010100
-  //11001110111111
-  //00110101000000 = 0xC40
-  highs.setOptionValue("presolve_rule_off", 0x3DD4);
-  highs.presolve();
-  const HighsPresolveStatus& model_status = highs.getModelPresolveStatus();
-  ip->presolveCols = model.lp_.num_col_;
-  ip->presolveRows = model.lp_.num_row_;
-
-  HighsPresolveLog log = highs.getPresolveLog();
-  for (int i=0; i<log.rule.size(); i++)
-    if (model_status == HighsPresolveStatus::kReducedToEmpty)
-      countPresolveRuleApplications[i] += log.rule[i].call;
-
-  return model_status == HighsPresolveStatus::kReducedToEmpty;
-}
-
-void writeNewFile(vector<int> dataPos, string name) {
-  ofstream newFile;
-  newFile.open (name);
-  for (auto uId: dataPos) {
-    auto u = cases[uId];
-    newFile << "~~~~~\n";
-    newFile << to_string(u.nVars) << "\n";
-    newFile << to_string(u.nIneqs) << "\n";
-    for (auto row: u.ineqs) {
-      for (auto e: row)
-        newFile << to_string(e) << " ";
-      newFile << "\n";
-    }
-    newFile << to_string(u.nEqs) << "\n";
-    for (auto row: u.eqs) {
-      for (auto e: row)
-        newFile << to_string(e) << " ";
-      newFile << "\n";
-    }
-  }
-  newFile.close();
-}
-
-/*
-vector<vector<long double>> transpose(vector<vector<long double>> A) {
-  vector<long double> r(A.size(), 0);
-  vector<vector<long double>> At(A[0].size(), r);
-  for (int row=0; row<A.size(); row++){
-    for (int col=0; col<A[0].size(); col++) {
-      At[col][row] = A[row][col];
-    }
-  }
-  return At;
-}
-*/
-
 
 vector<vector<long double>> transposeD(vector<vector<long double>> b){
   if (b.size() == 0)
@@ -552,7 +401,15 @@ vector<vector<long double>> glue(vector<vector<long double>> A, vector<vector<lo
       for (auto e: B[row])
         A[row].push_back(e);
     }
-  }
+  } /*else {
+    cout << "\n\n\tWRONG DIMENSIONS\n\n";
+    cout << "\nA: \n";
+    for (auto e: A)
+      cout << e;
+    cout << "\nB: \n";
+    for (auto e: B)
+      cout << "row: " << e;
+  }*/
   return A;
 }
 
@@ -562,20 +419,19 @@ vector<long double> glueVec(vector<long double> A, vector<long double> B) {
   return A;
 }
 
-vector<vector<long double>> I(int n, int zeroes) {
+vector<vector<long double>> I(int x, int y) {
   vector<vector<long double>> A;
-  for (int row=0; row<zeroes; row++)
-    A.push_back(vector<long double> (n+zeroes, 0));
-  for (int row=0; row<n; row++) {
+  for (int row=0; row<y; row++) {
     vector<long double> r;
-    for (int col=0; col<n; col++)
-        r.push_back((int)(row==col));
+    for (int col=0; col<x; col++) {
+        r.push_back((long double)(col==row));
+    }
     A.push_back(r);
-  }    
+  }
   return A;
 }
 
-tuple<vector<vector<long double>>, vector<long double>> extractAb(vector<vector<HighsInt>> p) {
+tuple<vector<vector<long double>>, vector<long double>> extractAb(vector<vector<int>> p) {
   vector<vector<long double>> A;
   vector<long double> b;
 
@@ -588,86 +444,6 @@ tuple<vector<vector<long double>>, vector<long double>> extractAb(vector<vector<
     b.push_back(-p[i][0]);
   }
   return make_tuple(A, b);
-}
-
-HighsModel findDual(int ind) {
-  IP tc = cases[ind];
-
-  vector<vector<long double>> A1, A2;
-  vector<long double> b, b2;
-  tie(A1, b) = extractAb(tc.ineqs);
-  tie(A2, b2) = extractAb(tc.eqs);
-  //find the new A matrix
-  auto row1 = glue(A1, glue(findMinus(A1), I(0, A1.size())));
-  auto row2 = glue(A2, glue(findMinus(A2), findMinus(I(A2.size(), 0))));
-  for (auto row: row2)
-    row1.push_back(row);
-  auto A = glue(transpose(row1), findMinus(I(row1[0].size(), 0)));
-
-  //make b vector
-  b.insert(b.end(), b2.begin(), b2.end());
-
-  //convert b to long double
-  vector<double> bd;
-  for (auto e: b)
-    bd.push_back((double)e);
-
-  HighsModel model;
-  model.lp_.num_col_ = b.size();
-  model.lp_.num_row_ = A.size();
-
-  vector<double> lb;
-  vector<double> ub;
-  for (auto row: A) {
-    lb.push_back(0.);
-    ub.push_back(1.0e30);
-  }
-
-  model.lp_.col_lower_ = vector<double> (b.size(), -1.0e30);
-  model.lp_.col_upper_ = vector<double> (b.size(), 1.0e30);
-  model.lp_.col_cost_ = bd;
-  model.lp_.row_lower_ = lb;
-  model.lp_.row_upper_ = ub;
-
-  //count the number of non-zeros in the matrix A
-  int nonZeros = 0;
-  for (auto row: A){
-    for (auto e: row) {
-      if (e != 0)
-        nonZeros++;
-    }
-  }
-
-  //index each non zero element along and down columns
-  vector<int> start;
-  vector<int> index;
-  vector<double> values;
-
-  int c = 0;
-  for (int col = 0; col <= b.size(); col++) {
-    int cN = true;
-    for (int row = 0; row < A.size(); row++)
-      if (A[row][col] != 0) {
-        index.push_back(row);
-        values.push_back((double)A[row][col]);
-        if (cN) {
-          start.push_back(c);
-          cN = false;
-        }
-        c++;
-      }
-    if (cN)
-      start.push_back(c);
-  }
-
-  start.push_back(nonZeros);
-
-  model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
-  model.lp_.a_matrix_.start_ = start;
-  model.lp_.a_matrix_.index_ = index;
-  model.lp_.a_matrix_.value_ = values;
-
-  return model;
 }
 
 vector<vector<long double>> upToRow(vector<vector<long double>> A, int row) {
@@ -722,9 +498,9 @@ tuple<tuple<int, int>, bool> getPivot(vector<vector<long double>> tableau, vecto
     }
   }
 
-  cout << "\ndr: " << dr;
+  //cout << "\ndr: " << dr;
 
-  cout << "\ncol: " << col << "\n";
+  //cout << "\ncol: " << col << "\n";
   //find the min row, taking the smallest index if we have a tie, second part if bland's rule
   long double min = 10000000;
   auto t = transposeD(tableau);
@@ -748,13 +524,13 @@ tuple<tuple<int, int>, bool> getPivot(vector<vector<long double>> tableau, vecto
   if (unbounded)
     return make_tuple(make_tuple(row, col), unbounded);
   */
-  cout << "\nRow length: " << rows.size();
+  //cout << "\nRow length: " << rows.size();
   row = 100000000;
   for (int i = 0; i < rows.size(); i++)
     if (rows[i] < row) {
       row = rows[i];
     }
-  cout << "\nrow: " << row << "\n";
+  //cout << "\nrow: " << row << "\n";
 
   //I suspect this means that it is infeasible????
   if (row == 100000000)
@@ -763,10 +539,10 @@ tuple<tuple<int, int>, bool> getPivot(vector<vector<long double>> tableau, vecto
   return make_tuple(make_tuple(row, col), false);
 }
 
-long double get_b(tableauStruct tab, int i) {
-  if (i < tab.nRows)
-    return (long double)tab.b[i]/(long double)tab.div[i];
-  cout << "\nIndex too large";
+long double get_b(tableauStruct *tab, int i) {
+  if (i < tab->nRows)
+    return (long double)tab->b[i]/(long double)tab->div[i];
+  //cout << "\nIndex too large";
   return 0.;
 }
 
@@ -776,12 +552,14 @@ vector<vector<long double>> pivot(vector<vector<long double>> tableau, tuple<int
 
   auto v = tableau[row][col];
 
+  /*
   cout << "\nv: " << v;
   cin.clear();
   if (v==0.) {
     cout << "\nv is 0";
     cin.get();
   }
+  */
 
   //this is where we're getting the error from
   auto gamma = transposeD(tableau)[col];
@@ -833,10 +611,12 @@ bool canImprove(vector<long double> r) {
 
 bool canImproveDual(tableauStruct *tab) {
   //if we have any augmentation variables in the basis then we should remove them
+  /*
   for (auto e: tab->basis) {
     if (e >= tab->nCols - tab->nEqs)
       return true;
   }
+  */
 
   //check that the reduced costs are all greater than or equal to 0
   for (auto e: tab->reducedCosts) {
@@ -849,7 +629,7 @@ bool canImproveDual(tableauStruct *tab) {
   //cout << "\nThis far";
   bool flag2 = false;
   for (int i = 0; i < tab->nRows; i++) {
-    if (get_b(*tab, i) < 0.) {
+    if (get_b(tab, i) < 0.) {
       //cout << "\nCAN IMPROVE: " << get_b(*tab, i);
       flag2 = true;
     }
@@ -867,6 +647,7 @@ vector<long double> updateZ(vector<long double> c, vector<int> B, vector<vector<
   vector<long double> z(tab[0].size(), 0.);
   for (int row=0; row<tab.size(); row++) {
     for (int col=0; col<tab[row].size(); col++) {
+      /*
       if (isnan(tab[row][col])) {
         cin.clear();
         cout << "\n v is nan" << tab[row][col] << " col " << col << " row " << row;
@@ -878,6 +659,7 @@ vector<long double> updateZ(vector<long double> c, vector<int> B, vector<vector<
         cout << c[B[row]];
         cin.get();
       }
+      */
       z[col] += c[B[row]] * tab[row][col];
     }
   }
@@ -894,6 +676,7 @@ vector<int> updateZInt(vector<int> c, vector<int> B, vector<vector<int>> A, vect
   vector<int> z(tab[0].size(), 0.);
   for (int row=0; row<tab.size(); row++) {
     for (int col=0; col<tab[row].size(); col++) {
+      /*
       if (isnan(tab[row][col])) {
         cin.clear();
         cout << "\n v is nan" << tab[row][col] << " col " << col << " row " << row;
@@ -905,6 +688,7 @@ vector<int> updateZInt(vector<int> c, vector<int> B, vector<vector<int>> A, vect
         cout << c[B[row]];
         cin.get();
       }
+      */
       z[col] += c[B[row]] * tab[row][col];
     }
   }
@@ -1051,15 +835,81 @@ vector<long double> getSplitSolution(tableauStruct *tableau) {
   //int bc = 0;
   //cout << "\nA\tdiv\tb\tindex\n";
   for (int i=0; i < tableau->nRows; i++) {
-    if (tableau->A[i][tableau->basis[i]] == 0)
+    if (tableau->A[i][tableau->basis[i]] == 0) {
+      //cout << "\nSplit sol size: " << splitSolution.size() << "\tnCols: " << tableau->nCols;
+      //cout << "\ni: " << i << "\tbasis[i]: " << tableau->basis[i] << "\n";
       splitSolution[tableau->basis[i]] = 0;
+    }
     else
-      splitSolution[tableau->basis[i]] = get_b(*tableau, i)/tableau->A[i][tableau->basis[i]];
+      splitSolution[tableau->basis[i]] = get_b(tableau, i)/tableau->A[i][tableau->basis[i]];
   }
   return splitSolution;
 }
 
-int isPrimalFeasible(vector<long double> splitSolution, vector<vector<long double>> A1, vector<vector<long double>> A2, vector<long double> b, int nVars) {
+vector<long double> doPostsolve(problem *p, vector<long double> x) {
+  //cout << "\nStart postsolve: " << p->presolveStack.size();
+  //This should go after we recombine x
+  //There are only 3 postsolves that I need to apply so far
+  for (int i=p->presolveStack.size()-1; i>=0; i--) {
+    //cout << "\n\nType: " << p->presolveStack[i].type << "\tx0: " << x;
+    switch (p->presolveStack[i].type) {
+      case (EmptyColumn): {
+        //cout << "\nEmpty Row";
+        //In this case we should put back in a variable in x set to 0
+        //cout << "\nx1" << x;
+        //cout << "\ninsert index: " << p->presolveStack[i].columnIndex;
+        x.insert(x.begin()+p->presolveStack[i].columnIndex, 0.);
+        //cout << "\nx2: " << x;
+      }break;
+      case (RowSingleton): {
+        //cout << "\nRow Singleton";
+        //Here we don't need to put back in a variable, we just need to change the current value of x
+        //cout << "\nx1" << x;
+        //cout << "\ninsert index: " << p->presolveStack[i].columnIndex;
+        //However, we should be careful about how to put it back
+        //if the row is an equation then we should just change it no matter what
+        if (p->presolveStack[i].eq)
+            x[p->presolveStack[i].columnIndex] = p->presolveStack[i].x;
+        else {
+            //if it's an inequality, then we should first check if the current value in x already satisfies the constraint, 
+            //if not then we can update it
+            if (x[p->presolveStack[i].columnIndex] > p->presolveStack[i].x)
+                x[p->presolveStack[i].columnIndex] = p->presolveStack[i].x;
+        }
+        //cout << "\nx2: " << x;
+      }break;
+      case (ColumnSingleton): {
+        //cout << "\nColumn Singleton";
+        //Here we need to use the row we stored to calculate a value for a new x variable, which we then need to add back to the problem
+        //first add back in x, set it to 0 for now
+        //cout << "\nx1: " << x;
+        //cout << "\ninsert index: " << p->presolveStack[i].columnIndex;
+        x.insert(x.begin()+p->presolveStack[i].columnIndex, 0.);
+        //then find (row)x
+        long double q = 0.;
+        //segfault here. Somehow, even though its an EmptyColumn, we're entering into this case>??
+        //cout << "\n\nRow: " << p->presolveStack[i].row;
+        for (int j=0; j<x.size(); j++)
+          q += p->presolveStack[i].row[j]*x[j];
+        //now we find the new value for x
+        x[p->presolveStack[i].columnIndex] = (p->presolveStack[i].b - q)/p->presolveStack[i].row[p->presolveStack[i].columnIndex];
+        //cout << "\nx1: " << x;
+        //test to see if x is an integer, if the constraint was an equality constraint
+        if (p->presolveStack[i].eq) {
+          if (x[p->presolveStack[i].columnIndex] - floor(x[p->presolveStack[i].columnIndex]) != 0.) {
+             p->infeasible = true;
+             return x;
+          }
+        }
+      }break;
+    }
+    if (p->infeasible)
+      return x;
+  }
+  return x;
+}
+
+int isPrimalFeasible(problem *p, tableauStruct *tab, vector<long double> splitSolution, vector<vector<long double>> A1, vector<vector<long double>> A2, vector<long double> b, int nVars) {
   
   //cout << "\nSplit Solution:\n";
   //cout << splitSolution;
@@ -1075,48 +925,80 @@ int isPrimalFeasible(vector<long double> splitSolution, vector<vector<long doubl
     x.push_back(splitSolution[i]);
   */
 
+  /*
+  cout << "\nSplitsol: " << splitSolution;
+  cout << "\nSize of A: " << tab->A.size();
+  if (tab->A.size() > 0)
+    cout << "\nnVars: " << nVars << "\tnumber of ineqs: " << tab->nRows-tab->nEqs << "\tActual nVars of A: " << tab->A[0].size()  << "\nNEqs: " << tab->nEqs;
+  */
+
   for (int i=0; i<nVars; i++)
     x.push_back(splitSolution[i] - splitSolution[i+nVars]);
 
+  //cout <<  "\nX entering the postsolve: " << x;
+
+  if (p->presolveStack.size() == 0) {
+    if (tab->A.size() == 0)
+        return 1;
+  } else {
+    if (tab->A.size() == 0)
+      return 1;
+    x = doPostsolve(p, x);
+    if (p->infeasible)
+        return 0;
+  }
+
+  /*
   cout << "\nSplit Solution: " << splitSolution;
   cout << "\nnVars: " << nVars << "\tx:\n";
   cout << x;
+  */
 
   //check if it is a primal feasible solution
   vector<long double> v1, v2;
   for (auto row: A1) {
     long double e = 0;
-    for (int i=0; i<nVars; i++) {
+    for (int i=0; i<row.size(); i++) {
       e += (long double)row[i]*x[i];
     }
     v1.push_back(e);
   }
   for (auto row: A2) {
     long double e = 0;
-    for (int i=0; i<nVars; i++) {
+    for (int i=0; i<row.size(); i++) {
       e += (long double)row[i]*x[i];
     }
     v2.push_back(e);
   }
 
+  /*
   cout << "\nSolutions\n";
   cout << x;
   cout << "\nSolution Values\n";
   cout << v1 << v2;
   cout << "\nbounds\n";
   cout << b;
+  */
+
+  for (auto e: v1)
+    if (isnan(e))
+        cin.get();
+
+  for (auto e: v2)
+    if (isnan(e))
+        cin.get();
 
   //check if inequalities are valid
   for (int i=0; i<v1.size(); i++)
     if (v1[i] > b[i]) {
-      cout << "\nWHERE IT FAILS: " << v1[i] << "  >  " << b[i];
+      //cout << "\nWHERE IT FAILS: " << v1[i] << "  >  " << b[i];
       return 0;
     }
   //check if the equalities are valid
   long double eps = 0.01;
   for (int i=v1.size(); i<b.size(); i++)
     if (v2[i-v1.size()] < b[i] - eps ||  v2[i-v1.size()] > b[i] + eps){
-      cout << "\nWHERE IT FAILS: " << v2[i-v1.size()] << "  >  " << b[i];
+      //cout << "\nWHERE IT FAILS: " << v2[i-v1.size()] << "  >  " << b[i];
       return 0;
     }
   
@@ -1124,252 +1006,375 @@ int isPrimalFeasible(vector<long double> splitSolution, vector<vector<long doubl
   return 1;
 }
 
-
-vector<postsolveStep> presolveStack;
-
-tuple<tuple<tuple<vector<vector<long double>>, vector<vector<long double>>>, vector<long double>>, bool> doPresolve(vector<vector<long double>> A1, vector<vector<long double>> A2, vector<long double> b) {
-  // return (((A1, A2), b), could still be feasible)
-  vector<vector<long double>> A1t;
-  vector<vector<long double>> A2t;
+vector<presolveStep> doPresolve(problem *p, tableauStruct *tab) {
+  //This should go before we split x to get lower bounds on it
+  vector<vector<long double>> At;
+  vector<vector<long double>> Tt;
   vector<long double> bt;
 
-  //Rule 1
-  //empty column
-  auto T1 = transpose(A1);
-  auto T2 = transpose(A2);
-  vector<vector<long double>> T1t;
-  for (int r=0; r<A1.size(); r++) {
-    auto row = A1[r];
-    for (auto e: row) {
-      if (e != 0) {
-        T1t.push_back(row);
-        bt.push_back(b[r]);
-        break;
-      }
-    }
-  }
-  vector<vector<long double>> T2t;
-  for (int r=0; r<A2.size(); r++) {
-    auto row = A2[r];
-    for (auto e: row) {
-      if (e != 0) {
-        T2t.push_back(row);
-        bt.push_back(b[r+A1.size()]);
-        break;
-      }
-    }
-  }
-  A1 = transpose(T1t);
-  A2 = transpose(T2t);
-  b = bt;
+  bool changed = true;
+  //loop the presolve until it makes no changes
+  while (changed) {
+    /*
+    cout << "\nA:\n";
+    for (int y = 0; y<tab->A.size(); y++)
+      cout << tab->b[y] << "\t" << tab->A[y];
+    */
+    changed = false;
 
-  //singleton row
-  /*
-    Where I don't know what to do for this one, maybe remove the constraint here, then add it back in when it comes time 
-    to solve it. This makes sense. It means I'd have to pass the original problem to the dual simplex, then after the 
-    dual simplex receives the problem and remembers it, then I'll apply the presolve
-  */
-  for (int r=0; r<A1.size(); r++) {
-    auto row = A1[r];
-    bool flag = false;
-    int I = 0;
-    for (int i=0; i<row.size(); i++) {
-      auto e = row[i];
-      if (e != 0) {
-        if (flag) {
-          flag = false;
-          I = i;
-          break;
-        }
-        flag = true;
-      }
+    //check that A hasn't been reduced to empty
+    //If A has just 1 row left then it can always be reduced using a column singleton
+    if (tab->A.size() == 1) {
+      tab->A = vector<vector<long double>> {};
+      tab->b = vector<long double> {};
+      return p->presolveStack;
     }
-    if (flag) {
-      //we have a singleton row. What to put here?
-      //as this is in A1 it is unbounded
-      //I should calculate the value of x
-      long double x = b[r]/A1[r][I];
-      //apply this as an upper bound on x[I], if I decide to implement dominated columns
-    }
-  }
-  for (int r=0; r<A2.size(); r++) {
-    auto row = A2[r];
-    bool flag = false;
-    int I = 0;
-    for (int i=0; i<row.size(); i++) {
-      auto e = row[i];
-      if (e != 0) {
-        if (flag) {
-          flag = false;
-          I = i;
-          break;
-        }
-        flag = true;
-      }
-    }
-    if (flag) {
-      //we have a singleton row. What to put here?
-      //as this is in A2 we have a fixed variable in x
-      long double x = b[r]/A1[r][I];
-      if (x - floor(x) != 0.) {
-        return make_tuple(make_tuple(make_tuple(A1t, A2t), bt), false);
-      }
-    }
-  }
 
-  //Rule 2
-  //fixed column
-  T1 = transpose(A1);
-  T2 = transpose(A2);
-  T1t.clear();
-  T2t.clear();
-  bt.clear();
-  int I = -1;
-  for (int r=0; r<T1.size(); r++) {
-    auto row = T1[r];
-    bool flag = false;
-    for (int i=0; i<row.size(); i++) {
-      auto e = row[i];
-      if (e != 0) {
-        if (flag) {
-          flag = false;
-          I = i;
-          break;
-        }
-        flag = true;
-      }
-    }
-    if (!flag) {
-      T1t.push_back(row);
-    } else {
-      // this is where we have a column singleton
-      A1[I][r] = 0.;
-      presolveStack.push_back(postsolveStep{type: "Column Singleton", row: A1[I], b: b[I], eq: false, columnIndex: r});
-    }
-  }
-  if (I > 0) {
-    //Now row I should be removed
-    for (int i=0; i<A1.size(); i++) {
-      if (i != I) {
-        A1t.push_back(A1[i]);
-        bt.push_back(b[i]);
-      }
-    }
-    A1 = A1t;
-    b = bt;
-  }
-  I = -1;
-  for (int r=0; r<T2.size(); r++) {
-    auto row = T2[r];
-    bool flag = false;
-    for (int i=0; i<row.size(); i++) {
-      auto e = row[i];
-      if (e != 0) {
-        if (flag) {
-          flag = false;
-          I = i;
-          break;
-        }
-        flag = true;
-      }
-    }
-    if (!flag) {
-      T2t.push_back(row);
-    } else {
-      // this is where we have a column singleton
-      A2[I][r] = 0.;
-      presolveStack.push_back(postsolveStep{type: "Column Singleton", row: A1[I], b: b[I+A1.size()], eq: true, columnIndex: r});
-    }
-  }
-  A1 = transpose(T1t);
-  A2 = transpose(T2t);
-  if (I > 0) {
-    A2t.clear();
+    //Rule 1
+    //remove all empty rows
+    //In this rule we simply remove all empty rows
+    Tt.clear();
+    At.clear();
     bt.clear();
-    //Now row I should be removed
-    for (int i=0; i<A2.size(); i++) {
-      if (i != I) {
-        A2t.push_back(A2[i]);
-        bt.push_back(b[i+A1.size()]);
+    int newNRows = 0;
+    int newNEqs = 0;
+    for (int r=0; r<tab->A.size(); r++) {
+      auto row = tab->A[r];
+      bool flag = false;
+      for (auto e: row) {
+        if (e != 0.) {
+          At.push_back(row);
+          bt.push_back(tab->b[r]);
+          newNRows++;
+          if (r >= tab->nRows - tab->nEqs)
+            newNEqs++;
+          flag = true;
+          break;
+        }
+      }
+      if (!flag) {
+        if (tab->b[r] != 0) {
+            //then we don't have an empty row
+            p->infeasible = true;
+            return p->presolveStack;
+        }
+        //cout << "\nEmpty Row: " << row;
+        changed = true;
       }
     }
-    A2 = A2t;
-    b = bt;
-  }
+    if (changed) {
+      tab->A = At;
+      tab->b = bt;
+      tab->nRows = newNRows;
+      tab->nEqs = newNEqs;
+      continue;
+    }
 
-  //remove all empty rows
-  A1t.clear();
-  bt.clear();
-  for (int r=0; r<A1.size(); r++) {
-    auto row = A1[r];
-    for (auto e: row) {
-      if (e != 0) {
-        A1t.push_back(row);
-        bt.push_back(b[r]);
+    //Rule 2
+    //empty column
+    //In this rule we simply remove variables in x
+    
+    int newNCols = 0;
+    auto T = transpose(tab->A);
+    Tt.clear();
+    bt.clear();
+    int  I = -1;
+    for (int c=0; c<T.size(); c++) {
+      int It;
+      auto col = T[c];
+      bool flag = false;
+      for (int r = 0; r<col.size(); r++) {
+        auto e = col[r];
+        if (e != 0.) {
+          flag = false;
+          break;
+        }
+        flag = true;
+        It = c;
+      }
+      if (flag) {
+        //we've found an empty column
+        I = It;
+        //cout << "\nEmpty Column: " << I;
+        changed = true;
         break;
       }
     }
-  }
-  A2t.clear();
-  for (int r=0; r<A2.size(); r++) {
-    auto row = A2[r];
-    for (auto e: row) {
-      if (e != 0) {
-        A2t.push_back(row);
-        bt.push_back(b[r+A1.size()]);
+    
+    if (changed) {
+       //Add to the presolve stack
+      p->presolveStack.push_back(presolveStep{type: EmptyColumn, eq: false, x:0., columnIndex: I});
+      //remove the Ith column
+      //cout << "\nWill remove column: " << I << ": " << T[I];
+      T.erase(T.begin()+I);
+      tab->A = transpose(T);
+    
+      tab->nRows = tab->A.size();
+      if (tab->nRows > 0)
+        tab->nCols = tab->A[0].size();
+      else
+        tab->nCols = 0;
+      if ( tab->nRows == 0)
+        tab->nEqs = 0;
+      continue;
+    }
+
+    //Rule 3
+    //singleton row
+    //In this one we keep the variable for x and we will fix it to the value that this technique finds in the postsolve
+    /*
+    I = -1;
+    int R = -1;
+    for (int r=0; r<tab->A.size(); r++) {
+      int It;
+      int Rt;
+      auto row = tab->A[r];
+      bool flag = false;
+      for (int c = 0; c<row.size(); c++) {
+        auto e = row[c];
+        if (e != 0.) {
+          if (!flag) {
+            flag = true;
+            It = c;
+            Rt = r;
+          } else {
+            flag = false;
+            It = -1;
+            Rt = -1;
+            break;
+          }
+        }
+      }
+      if (flag) {
+        //we've found a row singleton
+        I = It;
+        R = Rt;
+        cout << "\nRow Singleton: " << I << ", " << R;
+        changed = true;
         break;
       }
     }
-  }
-  A1 = A1t;
-  A2 = A2t;
-  b = bt;
 
-  //redundant row
-  A1t.clear();
-  A2t.clear();
-  bt.clear();
-  for (int r1=0; r1<A1.size(); r1++) {
-    auto row1 = A1[r1];
-    bool add = true;
-    for (int r2=0; r2<A1.size(); r2++) {
-      auto row2 = A1[r2];
-      if (row1 == row2 && r1 != r2) {
-        if (b[r1] < b[r2]) {
-          A1t.push_back(row1);
-          bt.push_back(b[r1]);
-        } else if (b[r1] == b[r2]) {
-          if (r1 < r2) {
-            A1t.push_back(row1);
-            bt.push_back(r1);
+    if (changed) {
+      long double x = tab->b[R]/tab->A[R][I];
+      bool isContra = false;
+      for (int q=p->presolveStack.size()-1; q>=0; q--) {
+        if (p->presolveStack[q].row.size() == tab->A[0].size()) {
+          if (p->presolveStack[q].type == RowSingleton) {
+            if (p->presolveStack[q].columnIndex == I) {
+              long double eps = 0.0001;
+              long double a1 = tab->A[R][I]/abs(tab->A[R][I]);
+              long double a2 = p->presolveStack[q].row[I]/abs(p->presolveStack[q].row[I]);
+              if (a1+a2 <= eps && a1+a2 >= -eps) {
+                //we have a situation where we could have a contradiction
+                long double b1 = tab->b[R]/abs(tab->A[R][I]);
+                long double b2 = p->presolveStack[q].b/abs(p->presolveStack[q].row[I]);
+                if (b1+b2 < 0.) {
+                  //we have a situation with no solution
+                  p->infeasible = true;
+                  return p->presolveStack;
+                }
+              }
+            }
+          }
+        }
+      }
+      tab->A.erase(tab->A.begin()+R);
+      tab->b.erase(tab->b.begin()+R);
+      tab->nRows = tab->A.size();
+      if (tab->nRows > 0)
+        tab->nCols = tab->A[0].size();
+      else
+        tab->nCols = 0;
+      if (R >= tab->nRows - tab->nEqs) {
+        p->presolveStack.push_back(presolveStep{type: RowSingleton, row: tab->A[R], b: tab->b[R], eq: true, x:x, columnIndex: I});
+        tab->nEqs -= 1;
+      } else {
+        p->presolveStack.push_back(presolveStep{type: RowSingleton, row: tab->A[R], b: tab->b[R], eq: false, x:x, columnIndex: I});
+      }
+      continue;
+    }
+    */
+    //Rule 4
+    //fixed column
+    //In this rule we remove a column and a row
+    //get the column index of the first column with a singleton 
+    T = transpose(tab->A);
+    Tt.clear();
+    bt.clear();
+    I = -1;
+    int R = -1;
+    for (int c=0; c<T.size(); c++) {
+      int It;
+      int Rt;
+      auto col = T[c];
+      bool flag = false;
+      for (int r = 0; r<col.size(); r++) {
+        auto e = col[r];
+        if (e != 0.) {
+          if (!flag) {
+            flag = true;
+            It = c;
+            Rt = r;
+          } else {
+            flag = false;
+            It = -1;
+            Rt = -1;
+            break;
+          }
+        }
+      }
+      if (flag) {
+        //we've found a column singleton
+        I = It;
+        R = Rt;
+        //cout << "\nColumn Singleton: column: " << I << ", row: " << R;
+        //cout << "\nnEqs: " << tab->nEqs << "\tnRows: " << tab->nRows;
+        changed = true;
+        break;
+      }
+    }
+
+    if (changed) {
+      //Add to the presolve stack
+      p->presolveStack.push_back(presolveStep{type: ColumnSingleton, row: tab->A[R], b: tab->b[R], eq: false, x:0, columnIndex: I});
+      if (tab->A.size() == 1) {
+        tab->A = vector<vector<long double>>();
+        tab->b = vector<long double>();
+        return p->presolveStack;
+      }
+      //remove the Ith column
+      //cout << "\nWill remove column: " << I << ": " << T[I];
+      T.erase(T.begin()+I);
+      At = transpose(T);
+      //remove the Rth row
+      At.erase(At.begin()+R);
+      tab->b.erase(tab->b.begin()+R);
+      //cout << "\nWill remove row: " << R << ": " << At[R];
+      
+      tab->A = At;
+
+      if (tab->nRows > 0)
+        tab->nCols = tab->A[0].size();
+      else
+        tab->nCols = 0;
+      //if (R >= tab->nCols - tab->nRows && tab->nEqs > 0)
+      if (R >= tab->nRows - tab->nEqs && tab->nEqs > 0)
+        tab->nEqs -= 1;
+
+      tab->nRows = tab->A.size();
+      
+      continue;
+    }
+
+    /*
+    cout << "\nA:\n";
+    for (auto y: tab->A)
+      cout << y;
+    cout << "\nChanged: " << changed;
+    */
+
+    //Rule 5
+    //redundant row
+    //In this rule we remove all constraints that are dominated by a different constraint
+    At.clear();
+    bt.clear();
+    newNRows = 0;
+    /*
+    for (int r1=0; r1<tab->nRows; r1++) {
+      auto row1 = tab->A[r1];
+      bool add = true;
+      for (int r2=0; r2<tab->nRows; r2++) {
+        auto row2 = tab->A[r2];
+        if (row1 == row2 && r1 != r2) {
+          if (tab->b[r1] < tab->b[r2]) {
+            At.push_back(row1);
+            bt.push_back(tab->b[r1]);
+            newNRows++;
+          } else if (tab->b[r1] == tab->b[r2]) {
+            if (r1 < r2) {
+              At.push_back(row1);
+              bt.push_back(tab->b[r1]);
+              newNRows++;
+            }
           }
         }
       }
     }
-  }
-  for (int r1=0; r1<A2.size(); r1++) {
-    auto row1 = A2[r1];
-    bool add = true;
-    for (int r2=0; r2<A2.size(); r2++) {
-      auto row2 = A2[r2];
-      if (row1 == row2 && r1 != r2) {
-        if (b[r1] < b[r2]) {
-          A1t.push_back(row1);
-          bt.push_back(b[r1]);
-        } else if (b[r1] == b[r2]) {
-          if (r1 < r2) {
-            A1t.push_back(row1);
-            bt.push_back(r1);
-          }
+    tab->nRows = newNRows;
+    tab->A = At;
+    tab->b = bt;
+    */
+    vector<vector<int>> likeRows;
+    bool flag = false;
+    for (int j=0;j<tab->A.size();j++) {
+        for (int i=0;i<likeRows.size();i++) {
+            if (tab->A[j] == tab->A[likeRows[i][0]]) {
+                likeRows[i].push_back(j);
+                flag = true;
+                break;
+            }
         }
-      }
+        if (!flag)
+            likeRows.push_back(vector<int> {j});
+    }
+    At.clear();
+    bt.clear();
+    int decEqs = 0;
+    for (auto I: likeRows) {
+        if (I.size() == 1) {
+            At.push_back(tab->A[I[0]]);
+            bt.push_back(tab->b[I[0]]);
+        } else {
+            changed = true;
+            //find which rows dominate
+            //find the minimum b for each set in likeRows, and this is the dominant
+            //in the process, identify if we get an equality being greater than an inequality
+            int mini = -1;
+            long double mine = 1000000000000;
+            for (auto i: I) {
+                if (tab->b[i] <= mine) {
+                    if (i > -1) {
+                        //check if the old dominant row is an equality
+                        //cout << "\nThis far 1";
+                        //cout <<  "\nnRows: " << tab->nRows << "\tnEqs:  " << tab->nEqs <<  "\teqs starting index: " << tab->nRows - tab->nEqs;
+                        if (tab->b[i] > mine && mini >= tab->nRows - tab->nEqs) {
+                            //cout << "\nThis far 2";
+                            //this must be infeasible because it means an equality is dominated
+                            p->infeasible = true;
+                            return p->presolveStack;
+                        }
+                    }
+                    mine = tab->b[i];
+                    mini = i;
+                } else {
+                    if (tab->b[i] > mine && i >= tab->nRows - tab->nEqs) {
+                        //this must be infeasible because it means an equality is dominated
+                        p->infeasible = true;
+                        return p->presolveStack;
+                    }
+                }
+            }
+            //now that we know the dominant row we can make the new A matrix
+            At.push_back(tab->A[mini]);
+            bt.push_back(tab->b[mini]);
+        }
+    }
+    if (changed) {
+        tab->A = At;
+        tab->b = bt;
+        tab->nRows = tab->A.size();
+        if (tab->nRows > 0)
+          tab->nCols = tab->A[0].size();
+        else
+          tab->nCols = 0;
+        //if (R >= tab->nCols - tab->nRows && tab->nEqs > 0)
+        if (R >= tab->nRows - tab->nEqs && tab->nEqs > 0)
+          tab->nEqs -= 1;
     }
   }
-  A1 = A1t;
-  A2 = A2t;
-  b = bt;
 
-  return make_tuple(make_tuple(make_tuple(A1t, A2t), bt), true);
+  return p->presolveStack;
 }
 
 int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, vector<long double> b, vector<long double> c) {
@@ -1388,60 +1393,143 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
   auto A2o = A2;
   auto bo = b;
 
-  
-  //get the number of columns in A1 and A2 so I can reconstruct the result at the end
-  int nVars;
-  if (A1.size() > 0)
-    nVars = A1[0].size();
-  else if (A2.size() > 0)
-    nVars = A2[0].size();
-  else
-    return 1;
-
-  //split x so that it is bound
-  A1 = glue(A1, findMinus(A1));
-
-  //A1 = glue(A1, I(A1.size(), 0));
-
-
-  A2 = glue(A2, findMinus(A2));
-
-  //add some zeroes where the slack variables would go
-  //A2 = glue(A2, makeZeroes(A2.size(), A1.size()));
-
   int nEqs = A2.size();
-
-  //add the cost of the slack variables
-  c = glueVec(c, vector<long double>(A1.size(), 0));
 
   //combine the 2 constraint matrices
   for (auto row: A2)
     A1.push_back(row);
 
-  //add the cost of the augmentation variables
-  c = glueVec(c, vector<long double>(nEqs, -1000000000000));
-  //add the coefficients for the slack and augmentation variables
-  A1 = glue(A1, I(A1.size(), 0));
-
-  int leaving = 0;          // this means the row
-  int entering = 1;         // this means the column
+  //do the presolve
   auto tableau = makeTableau(A1, b, c, nEqs);
+  //cout << "\n\nSize of reduced costs: " << tableau->reducedCosts.size() << "\n";
+  //cout << "\n\nnCols: " << tableau->nCols << "\n";
+  problem *p = new problem{infeasible: false};
+  doPresolve(p, tableau);
 
-  updateZTab(tableau);
-  updateReducedCostsTab(tableau);
+  //get the number of columns in A1 and A2 so I can reconstruct the result at the end
+  int nVars = tableau->nCols;
 
-  int its = 0;
-  /*
-  cout << "\n\nIteration: " << its << "\n";
-  for (auto row: tableau->A)
-    cout << row;
-  cout << "\nb:";
-  cout << tableau->b << "\n";
-  cout << "\nDiv: " << tableau->div;
-  cout << "\nB: " << tableau->basis << "\n";
-  */
+  if (tableau->A.size() > 0) {
 
-  while (canImproveDual(tableau)) {
+    //add A-
+    tableau->A = glue(tableau->A, findMinus(tableau->A));
+    //add the cost of x-
+    int h = tableau->c.size();
+    for (int i=0; i<h;i++)
+      tableau->c.push_back(0.);
+
+    tableau->nCols = tableau->A[0].size();
+    
+    //make sure we have enough columns for the number of rows, if not, add artificial variables
+    //add the cost of the slack variables
+    //c = glueVec(c, vector<long double>(tableau->nRows-tableau->nEqs, 0.))
+
+      //This one includes the slacks on the equalities
+      c = glueVec(c, vector<long double>(tableau->nRows+tableau->nEqs, 0.));
+      //if (tableau->A.size() <= tableau->A[0].size()) {
+          //find the number of rows of zeroes for the slack variables and add them
+      //auto X = I(tableau->nRows-tableau->nEqs, tableau->nRows);
+
+      /*
+      //get X1
+      auto X1 = glue(I(tableau->nRows-tableau->nEqs, tableau->nRows-tableau->nEqs), makeZeroes(tableau->nRows-tableau->nEqs, 2*tableau->nEqs));
+      auto X2 = glue(makeZeroes(tableau->nEqs, tableau->nRows-tableau->nEqs), glue(I(tableau->nEqs, tableau->nEqs), findMinus(I(tableau->nEqs, tableau->nEqs))));
+      auto X3 = findMinus(X2);
+
+      vector<vector<long double>> X;
+      for (auto x: X1) {
+        if (x.size() != 0)
+          X.push_back(x);
+      }
+      for (auto x: X2){
+        if (x.size() != 0)
+          X.push_back(x);
+      }
+      for (auto x: X3){
+        if (x.size() != 0)
+          X.push_back(x);
+      }
+
+      //Add the extra constraints
+      auto Ae = makeZeroes(tableau->nEqs, tableau->nCols);
+      for (auto e: Ae)
+        tableau->A.push_back(e);
+      //update b
+      b = glueVec(b, vector<long double> (tableau->nEqs, 0.));
+      */
+
+      auto Am = findMinus(tableau->A);
+      for (int i=tableau->nRows - tableau->nEqs; i<tableau->nRows; i++) {
+        tableau->A.push_back(Am[i]);
+        b.push_back(-b[i]);
+      }
+
+      auto X = I(tableau->nRows+tableau->nEqs, tableau->nRows+tableau->nEqs);
+
+
+      /*
+      cout << "\n\n\tX\n";
+      for (auto e: X)
+        cout << e;
+      */
+      
+      tableau->A = glue(tableau->A, X);
+
+      int basisBegin = tableau->nCols;
+
+      tableau->nCols = tableau->A[0].size();
+      /*} else {
+          //add the augmentation vars
+          tableau->A = glue(tableau->A, I(tableau->nRows, tableau->nRows));
+          tableau->nCols = tableau->A[0].size();
+          //add the cost of the artificial variables
+          c = glueVec(c, vector<long double>(tableau->nEqs, -10000000.));
+      }*/
+
+      //find a new basis
+      tableau->basis.clear();
+      for (int i = 0; i < tableau->nRows; i++)
+          tableau->basis.push_back(basisBegin + i);
+          //tableau->basis.push_back((i+tableau->nRows-tableau->nEqs)%tableau->nCols);
+
+
+    //split x so that it is bound
+    //A1 = glue(A1, findMinus(A1));
+
+    //A1 = glue(A1, I(A1.size(), 0));
+
+    //A2 = glue(A2, findMinus(A2));
+
+    //add some zeroes where the slack variables would go
+    //A2 = glue(A2, makeZeroes(A2.size(), A1.size()));
+
+    //combine the 2 constraint matrices
+    //for (auto row: A2)
+    //  A1.push_back(row);
+
+    //add the cost of the augmentation variables
+    //c = glueVec(c, vector<long double>(nEqs, -1000000000000));
+    //add the coefficients for the slack and augmentation variables
+    //A1 = glue(A1, I(A1.size(), 0));
+
+    int leaving = 0;          // this means the row
+    int entering = 1;         // this means the column
+    //auto tableau = makeTableau(A1, b, c, nEqs);
+
+    //Need to update the dimensions of reduced costs and z
+    tableau->z = vector<long double> (tableau->nCols, 0.);
+    tableau->reducedCosts = vector<long double> (tableau->nCols, 0.);
+
+    updateZTab(tableau);
+    updateReducedCostsTab(tableau);
+
+    /*
+    cout << "\n\nSize of reduced costs: " << tableau->reducedCosts.size() << "\n";
+    cout << "\n\nnCols: " << tableau->nCols << "\n";
+    */
+
+    int its = 0;
+    /*
     cout << "\n\nIteration: " << its << "\n";
     for (auto row: tableau->A)
       cout << row;
@@ -1449,108 +1537,122 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
     cout << tableau->b << "\n";
     cout << "\nDiv: " << tableau->div;
     cout << "\nB: " << tableau->basis << "\n";
-    if (its > 40) {
-      return 2;
-    }
-    //get pivot row, this gets the index with the most negative value of b, implementing the first part of blands rule
-    vector<long double> v;
-    vector<int> indSet;
-    for (int i = 0; i < tableau->basis.size(); i++) {
-      if (tableau->basis[i] >= tableau->nCols-tableau->nEqs) {
-        indSet.push_back(i);
-        v.push_back(-1000000.);
+    */
+
+    while (canImproveDual(tableau)) {
+      //cout << "\n\nIteration: " << its << "\n";
+      /*
+      for (auto row: tableau->A)
+        cout << row;
+      cout << "\nb:";
+      cout << tableau->b << "\n";
+      cout << "\nDiv: " << tableau->div;
+      cout << "\nB: " << tableau->basis << "\n";
+      */
+      /*if (its > 40) {
+        return 2;
+      }*/
+      //get pivot row, this gets the index with the most negative value of b, implementing the first part of blands rule
+      vector<long double> v;
+      vector<int> indSet;
+      for (int i = 0; i < tableau->basis.size(); i++) {
+        /*
+        if (tableau->basis[i] >= tableau->nCols-tableau->nEqs) {
+          indSet.push_back(i);
+          v.push_back(-100000000.);
+          continue;
+        }
+        */
+        long double theta = get_b(tableau, i);
+        if (theta < 0 && !isInLd(theta, v)) {
+          indSet.push_back(i);
+          v.push_back(theta);
+        }
       }
-      long double theta = get_b(*tableau, i);
-      if (theta < 0 && !isInLd(theta, v)) {
-        indSet.push_back(i);
-        v.push_back(theta);
+
+      if (v.size() == 0) {
+        break;
       }
-    }
+      //this gets the index of the variable corresponding to the smallest theta
+      //int leaving = indSet[distance(begin(v), min_element(begin(v), end(v)))];
+      auto e = *min_element(begin(v), end(v));
+      for (int i=0; i<v.size(); i++)
+        if (e==v[i])
+          leaving = indSet[i];
 
-    if (v.size() == 0) {
-      break;
-    }
-    //this gets the index of the variable corresponding to the smallest theta
-    //int leaving = indSet[distance(begin(v), min_element(begin(v), end(v)))];
-    auto e = *min_element(begin(v), end(v));
-    for (int i=0; i<v.size(); i++)
-      if (e==v[i])
-        leaving = indSet[i];
-
-    //get pivot col
-    //they will all have the same reduced cost, so we're always going to choose the entry with the most negative value with the smallest index
-    v.clear();
-    indSet.clear();
-    //cout << "\nBasis: " << tableau->basis;
-    for (int i = 0; i < tableau->nCols-nEqs; i++) {
-      if (tableau->A[leaving][i] == 0)
-        continue;
-      long double e = tableau->A[leaving][i];
-      if (!isIn(i, tableau->basis) && e < 0 && !isInLd(e, v)) {
-        indSet.push_back(i);
-        v.push_back(e);
+      //get pivot col
+      //they will all have the same reduced cost, so we're always going to choose the entry with the most negative value with the smallest index
+      v.clear();
+      indSet.clear();
+      //cout << "\nBasis: " << tableau->basis;
+      for (int i = 0; i < tableau->nCols; i++) {
+        if (tableau->A[leaving][i] == 0)
+          continue;
+        long double e = tableau->A[leaving][i];
+        if (!isIn(i, tableau->basis) && e < 0 && !isInLd(e, v)) {
+          indSet.push_back(i);
+          v.push_back(e);
+        }
       }
-    }
 
-    if (tableau->status=="failure")
-      break;
-    
-    if (tableau->status == "infeasible")
-      return 0;
+      //if (tableau->status=="failure")
+      //  break;
+      
+      if (tableau->status == "infeasible") {
+        return 0;
+      }
 
-    if (v.size() == 0) {
-      break;
-    }
+      if (v.size() == 0) {
+        //cout << "\n\n\tExiting the dual simplex here leaving: " << leaving << "\n\n";
+        break;
+      }
 
-    //entering = indSet[distance(begin(v), max_element(begin(v), end(v)))];
-    e = *max_element(begin(v), end(v));
-    for (int i=0; i<v.size(); i++)
-      if (e==v[i])
-        entering = indSet[i];
+      //entering = indSet[distance(begin(v), max_element(begin(v), end(v)))];
+      e = *max_element(begin(v), end(v));
+      for (int i=0; i<v.size(); i++)
+        if (e==v[i])
+          entering = indSet[i];
+      /*
+      cout << "\nLEAVING: " << leaving << "\n";
+      cout << "\nENTERING: " << entering << "\n";
+      cout << "\nPivot Element: " << tableau->A[leaving][entering];
+      */
 
-    //cout << "\nLEAVING: " << leaving << "\n";
-    //cout << "\nENTERING: " << entering << "\n";
-    //cout << "\nPivot Element: " << tableau->A[leaving][entering];
+      tableau->basis[leaving] = entering;
 
-    tableau->basis[leaving] = entering;
+      //pivot
+      pivotDual(tableau, leaving, entering);
 
-    //pivot
-    pivotDual(tableau, leaving, entering);
+      updateZTab(tableau);
+      updateReducedCostsTab(tableau);
 
-    updateZTab(tableau);
-    updateReducedCostsTab(tableau);
-
-    its++;
-  } 
+      its++;
+    } 
+  } else {
+    return 1;
+  }
   //if (!canImproveDual(tableau))
   //  cout << "\nCAN'T IMPROVE\n";
-  cout << "\n\nIteration: " << its << "\n";
-  for (auto row: tableau->A)
-    cout << row;
-  cout << "\nb:";
-  cout << tableau->b << "\n";
-  cout << "\nDiv: " << tableau->div;
-  cout << "\nB: " << tableau->basis << "\n";
-  cout << "\nStatus: " << tableau->status;
+
   /*
   for (int i=0; i<tableau->nRows; i++)
     if (get_b(*tableau, i) < 0)
       return 4;
   */
 
-  /*
+  
   //make sure reduced costs are all viable
   for (auto e: tableau->reducedCosts)
     if (e < 0)
       return 4;
-  */
+  
 
   //make sure we don't have any artificial variables in the basis
   /*
   for (auto e: tableau->basis)
     if (e > nEqs-1)
       return 5;
-  */
+    */
 
   //cout << "\nbasis:" << tableau->basis << "\nStart of arti: " << tableau->nCols-A2o.size()-1;
 
@@ -1570,11 +1672,114 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
   */
 
   // extract solution
-  return isPrimalFeasible(getSplitSolution(tableau), A1o, A2o, bo, nVars);
+  auto s = getSplitSolution(tableau);
+  auto r = isPrimalFeasible(p, tableau, s, A1o, A2o, bo, nVars);
+
+  return r;
+}
+
+
+HighsModel makeModel(IP *tc, bool isInt) {
+  //make a highs model with A, b taken from cases[id]
+  HighsModel model;
+  model.lp_.num_col_ = tc->nVars;
+  model.lp_.num_row_ = tc->nIneqs + tc->nEqs;
+  if (isInt)
+    model.lp_.integrality_ = vector<HighsVarType> (tc->nVars, HighsVarType::kInteger);
+
+  vector<double> lb;
+  vector<double> ub;
+  for (auto row: tc->ineqs) {
+    ub.push_back(-(double)row[0]);
+    lb.push_back(-1.0e30);
+  }
+  for (auto row: tc->eqs) {
+    lb.push_back(-(double)row[0]);
+    ub.push_back(-(double)row[0]);
+  }
+
+  //cout << "\nlb: " << lb;
+  //cout << "\nub: " << ub;
+
+  /*
+  cout << "\nIneqs\n";
+  for (auto row: tc->ineqs)
+    cout << row;
+  */
+
+  model.lp_.col_lower_ = vector<double> (tc->nVars, -1.0e30);
+  model.lp_.col_upper_ = vector<double> (tc->nVars, 1.0e30);
+  model.lp_.col_cost_ = vector<double> (tc->nVars, 0.0);
+  model.lp_.row_lower_ = lb;
+  model.lp_.row_upper_ = ub;
+
+  //count the number of non-zeros in the matrix A
+  int nonZeros = 0;
+  for (auto row: tc->ineqs){
+    int k = 0;
+    for (auto e: row) {
+      //skip the first column because it is the constant value already taken across to the lower bound
+      if (k > 0) {
+        if (e != 0)
+          nonZeros++;
+      }
+      k++;
+    }
+  }
+  for (auto row: tc->eqs){
+    int k = 0;
+    for (auto e: row) {
+      //skip the first column because it is the constant value already taken across to the lower bound
+      if (k > 0) {
+        if (e != 0)
+          nonZeros++;
+      }
+      k++;
+    }
+  }
+//index each non zero element along and down columns
+  vector<int> start;
+  vector<int> index;
+  vector<double> values;
+
+  int c = 0;
+  for (int col = 1; col <= tc->nVars; col++) {
+    int cN = true;
+    for (int row = 0; row < tc->nIneqs; row++)
+      if (tc->ineqs[row][col] != 0) {
+        index.push_back(row);
+        values.push_back((long double)tc->ineqs[row][col]);
+        if (cN) {
+          start.push_back(c);
+          cN = false;
+        }
+        c++;
+      }
+    for (int row = 0; row < tc->nEqs; row++)
+      if (tc->eqs[row][col] != 0) {
+        index.push_back(row+tc->nIneqs);
+        values.push_back((double)tc->eqs[row][col]);
+        if (cN) {
+          start.push_back(c);
+          cN = false;
+        }
+        c++;
+      }
+    if (cN)
+      start.push_back(c);
+  }
+
+  start.push_back(nonZeros);
+
+  model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
+  model.lp_.a_matrix_.start_ = start;
+  model.lp_.a_matrix_.index_ = index;
+  model.lp_.a_matrix_.value_ = values;
+
+  return model;
 }
 
 int main() {
-
   vector<size_t> hashKeys;
   vector<int> uniqueProblems;
 
@@ -1650,6 +1855,7 @@ int main() {
         ineqs.clear();
         eqs.clear();
         readIneqs = false;
+        delete ip;
       }
     }
     file.close(); 
@@ -1662,7 +1868,7 @@ int main() {
 
   //Finds how many are reduced to empty by presolve
   int both = 0;
-  
+  /*
   for (int i = 0; i<nCases; i++) {
     bool ic = getPresolve(&cases[i], true);
     bool c = getPresolve(&cases[i], false);
@@ -1683,42 +1889,8 @@ int main() {
   for (auto e: countPresolveRuleApplications)
     cout << e << "\t";
   cout << "\n";
-
+  */
   /*
-
-  // Test the duality
-  // 1. find the optimal value of the dual
-  // 2. if its <= 0 for all of the cases then the dual is probably ok
-  int working = 0;
-  int notWorking = 0;
-  int noConstraints = 0;
-  for (int ind=0; ind<nCases; ind++){
-    
-    printCase(ind);
-
-    if (cases[ind].nIneqs == 0 && cases[ind].nEqs == 0) {
-      noConstraints++;
-      continue;
-    }
-
-    auto dual = findDual(ind);
-    Highs highs;
-    HighsStatus return_status;
-    return_status = highs.passModel(dual);
-    assert(return_status==HighsStatus::kOk);
-    const HighsLp& lp = highs.getLp();
-    return_status = highs.run();
-    assert(return_status==HighsStatus::kOk);
-    const HighsModelStatus& model_status = highs.getModelStatus();
-    //assert(model_status==HighsModelStatus::kUnbounded);
-    const HighsInfo& info = highs.getInfo();
-    cout << "\n\n" << highs.solutionStatusToString(info.primal_solution_status) << "\n";
-    if (info.objective_function_value == 0)
-      working++;
-    else
-      notWorking++;
-    cout << "\n" << working << "\t" << notWorking << "\n";
-  }
 
   // It looks like this dual is accurate (probably) as it has optimal value 0 for all the test cases
 
@@ -1754,17 +1926,6 @@ int main() {
     auto dual = findDual(ind);
     cout << "this far";
 
-    Highs highs;
-    HighsStatus return_status;
-    return_status = highs.passModel(dual);
-    assert(return_status==HighsStatus::kOk);
-    const HighsLp& lp = highs.getLp();
-    return_status = highs.run();
-    assert(return_status==HighsStatus::kOk);
-    const HighsModelStatus& model_status = highs.getModelStatus();
-    //assert(model_status==HighsModelStatus::kUnbounded);
-    const HighsInfo& info = highs.getInfo();
-    
     IP tc = cases[ind];
     //find transposes of the 2 parts of the A matrix
     vector<vector<long double>> A1, A2;
@@ -1828,7 +1989,6 @@ int main() {
   cout << "\n\nIS IT WORKING? SHOULD BE 32!!!    " << simplex(c, A, b, 2) << "\n\n";
   */
   
-  /*
   //Test the dual simplex
   int infeasible = 0;
   int working = 0;
@@ -1841,9 +2001,9 @@ int main() {
   int highsFea = 0;
   int disagree = 0;
   int gap =0;
+  int empty = 0;
   for (int ind=0; ind<nCases; ind++){
-    cout << "\n \t IND:: " << ind << "\n";
-
+    /*
     cout << "\n \t IND:: " << ind << "\n";
     cout << "\n";
     cout << cases[ind].nVars << "\n";
@@ -1851,7 +2011,7 @@ int main() {
     cout << cases[ind].ineqs << "\n";
     cout << cases[ind].nEqs << "\n";
     cout << cases[ind].eqs << "\n";
-    
+    */
 
     // See what the highs solver finds
     auto primal = makeModel(&cases[ind], false);
@@ -1869,7 +2029,9 @@ int main() {
       highsInf++;
     if (model_status == HighsModelStatus::kOptimal || model_status == HighsModelStatus::kModelEmpty)
       highsFea++;
-    
+    if (model_status == HighsModelStatus::kModelEmpty)
+      empty++;
+
 
     bool triviallyFeasible = true;
     //check if inequalities are valid
@@ -1877,12 +2039,14 @@ int main() {
       if (0 > -cases[ind].ineqs[i][0])
         triviallyFeasible = false;
     //check if the equalities are valid
-    long double eps = 0.01;
+    long double eps = 0.000001;
     for (int i=0; i<cases[ind].nEqs; i++)
       if (0 < -cases[ind].eqs[i][0] - eps ||  0 > -cases[ind].eqs[i][0] + eps)
         triviallyFeasible = false;
     if (triviallyFeasible) {
+      working++;
       trivFea++;
+      continue;
     }
 
     bool triviallyInfeasible = false;
@@ -1895,7 +2059,6 @@ int main() {
         }
         if (!nonZero) {
           triviallyInfeasible = true;
-          infeasible++;
           break;
         }
       }
@@ -1909,14 +2072,16 @@ int main() {
         }
         if (!nonZero) {
           triviallyInfeasible = true;
-          infeasible++;
           break;
         }
       }
     }
 
-    if (triviallyInfeasible)
+
+   if (triviallyInfeasible) {
+      infeasible++;
       continue;
+   }
 
     if (cases[ind].nVars == 1) {
       infeasible++;
@@ -1928,55 +2093,13 @@ int main() {
       continue;
     }
 
-    vector<vector<long double>> A1, A2;
-    vector<long double> b, b2;
+    vector<vector<long double>> A1;
+    vector<vector<long double>> A2;
+    vector<long double> b;
+    vector<long double> b2;
     tie(A1, b) = extractAb(cases[ind].ineqs);
     tie(A2, b2) = extractAb(cases[ind].eqs);
-    b.insert(b.end(), b2.begin(), b2.end());
-
-    /*
-    cout << "\nA1\n";
-    for (auto row: A1)
-      cout << row;
-    cout << "\nA2\n";
-    for (auto row: A2)
-      cout << row;
-      */
-
-    /*
-
-    cout << "\nDo Presolve";
-    tuple<vector<vector<long double>>, vector<vector<long double>>> tup;
-    presolveStack.clear();
-    tie(tup, b) = doPresolve(A1, A2, b);
-    tie(A1, A2) = tup;
-
-    /*
-    cout << "\nA1\n";
-    for (auto row: A1)
-      cout << row;
-    cout << "\nA2\n";
-    for (auto row: A2)
-      cout << row;
-    */
-
-    /*
-    //testing a different approach
-    auto A2m = findMinus(A2);
-    vector<long double> b2m;
-    for (auto e: b2)
-      b2m.push_back(-e);
-
-    for (auto row: A2)
-      A1.push_back(row);
-    for (auto row: A2m)
-      A1.push_back(row);
-    b.insert(b.end(), b2m.begin(), b2m.end());
-    b.insert(b.end(), b2.begin(), b2.end());
-    A2.clear();
-    */
-
-    /*
+    b.insert(b.end(), b2.begin(), b2.end()); 
 
     auto x = dualSimplex(A1, A2, b, vector<long double>(cases[ind].nVars*2, 0.));
     if (x == 0)
@@ -1992,9 +2115,10 @@ int main() {
     if (x == 5)
       artInBasis++;
 
+    /*
     cout << "\n\ninfeasible: " << infeasible << "\tHighs Infeasible: " << highsInf;
     cout << "\nWorking: " << working << "\tHighs Solved to Optimality: " << highsFea;
-    cout << "\nIncorrect: " << incorrect;
+    cout << "\nIncorrect: " << incorrect << "\tHighs reduced to Empty: " << empty;
     cout << "\nMethod Fails: " << methodFails;
     cout << "\nArtificial Variable in the Basis: " << artInBasis;
     cout << "\nfailed: " << failed << "\n";
@@ -2002,21 +2126,29 @@ int main() {
     cout << "\n\nHighs Disagrees With my dual simplex: " << disagree << " times\n";
 
     cout << "\nTrivially Feasible: " << trivFea << "\n";
+    
 
-    if (x==2) {
-      cout << "\nHIGHS STATUS: " << utilModelStatusToString(model_status);
-      cout << "\nDual Simplex status: " << x;
-      cout << "\nA1 size: " << A1.size();
-      cout << "\nA2 size: " << A2.size();
-      cin.clear();
-      //cin.get();
+    if (model_status == HighsModelStatus::kOptimal && x == 0) {
+        cout << "\n\nGOES WRONG SOMEWHERE highs: optimal, mine: infeasible\n\n";
+        cin.clear();
+        cin.get();
     }
+
+    if (model_status == HighsModelStatus::kInfeasible && x == 1) {
+        cout << "\n\nGOES WRONG SOMEWHERE highs: infeasible, mine: optimal\n\n";
+        cin.clear();
+        cin.get();
+    }
+    */
+
+    //cin.get();
+    cin.clear();
 
   }
 
   cout << "\n\ninfeasible: " << infeasible << "\tHighs Infeasible: " << highsInf;
   cout << "\nWorking: " << working << "\tHighs Solved to Optimality: " << highsFea;
-  cout << "\nIncorrect: " << incorrect;
+  cout << "\nIncorrect: " << incorrect << "\tHighs reduced to Empty: " << empty;
   cout << "\nMethod Fails: " << methodFails;
   cout << "\nArtificial Variable in the Basis: " << artInBasis;
   cout << "\nfailed: " << failed << "\n";
@@ -2024,8 +2156,6 @@ int main() {
   cout << "\n\nHighs Disagrees With my dual simplex: " << disagree << " times\n";
 
   cout << "\nTrivially Feasible: " << trivFea << "\n";
-
-  */
 
 
   /*
