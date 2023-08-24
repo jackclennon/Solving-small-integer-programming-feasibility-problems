@@ -1,5 +1,5 @@
-//#include "Highs.h"
-//#include "lp_data/HighsModelUtils.h"
+#include "Highs.h"
+#include "lp_data/HighsModelUtils.h"
 #include <vector>
 #include <cmath>
 #include <fstream>
@@ -11,6 +11,23 @@
 #include <time.h>
 
 using namespace std;
+
+const int nCases = 5738; // <- unique set, full set -> 150218;
+const long double inf = 1e10;
+// #duplicates
+//                 145564    hashing    4624
+//                 144238    IPcomp     5980
+//                 144238    better hashing 5980, also much more efficient
+
+//Not very many is it
+
+/*
+
+Of these 5980 2301 reduce to empty if you relax the integer constraint
+it would be interesting to see what the frequency of each problem is within the set
+
+*/
+
 
 struct IP {
 
@@ -1006,6 +1023,7 @@ void doPresolve(problem *p, tableauStruct *tab) {
     cout << "\n" << p->lb;
     cout << p->ub;
     */
+
     changed = false;
 
     //remove any columns with closed bounds
@@ -1018,27 +1036,21 @@ void doPresolve(problem *p, tableauStruct *tab) {
             tab->b[j] -= tab->A[j][i]*p->lb[i];
           }
           I  = i;
-          changed = true;
-          break;
-        }
-        if (changed)
-          break;
-      }
-      if (changed) {
-        T.erase(T.begin()+I);
-        tab->A = transpose(T);
-        p->ub.erase(p->ub.begin()+I);
-        p->lb.erase(p->lb.begin()+I);
-        if (tab->A.size() == 0)
-          return;
-        if (tab->nRows > 0)
-          tab->nCols = tab->A[0].size();
-        else
-          tab->nCols = 0;
-        if (tab->nRows == 0)
-          return;
-        //cout << "\nRemoved Columns with closed bounds";
-        continue;
+          T.erase(T.begin()+I);
+          tab->A = transpose(T);
+          p->ub.erase(p->ub.begin()+I);
+          p->lb.erase(p->lb.begin()+I);
+          if (tab->A.size() == 0)
+            return;
+          if (tab->nRows > 0)
+            tab->nCols = tab->A[0].size();
+          else
+            tab->nCols = 0;
+          if (tab->nRows == 0)
+            return;
+          }
+          if (changed)
+            break;
       }
     }
 
@@ -1127,7 +1139,6 @@ void doPresolve(problem *p, tableauStruct *tab) {
       return;
    }
 
-
     //Check if we reach a state with a trivial solution
     bool triviallyFeasible = true;
     //first, make sure that the trivial solution is feasible
@@ -1193,7 +1204,7 @@ void doPresolve(problem *p, tableauStruct *tab) {
     
     if (changed) {
        //Add to the presolve stack
-      p->presolveStack.push_back(presolveStep{type: EmptyColumn, eq: false, x:0., columnIndex: I});
+      //p->presolveStack.push_back(presolveStep{type: EmptyColumn, eq: false, x:0., columnIndex: I});
       //remove the Ith column
       //cout << "\nWill remove column: " << I << ": " << T[I];
       T.erase(T.begin()+I);
@@ -1217,6 +1228,15 @@ void doPresolve(problem *p, tableauStruct *tab) {
     //Forcing Constraint
     vector<long double> h, g;
     for (int row=0; row<tab->nRows; row++) {
+      bool fullyBounded = true;
+      for (auto e: p->lb)
+        if (e==-inf)
+          fullyBounded = false;
+      for (auto e: p->ub)
+        if (e==inf)
+          fullyBounded = false;
+      if (!fullyBounded)
+        break;
       long double eh = 0.;
       long double eg = 0.;
       for (int col=0; col<tab->A[0].size(); col++) {
@@ -1228,27 +1248,20 @@ void doPresolve(problem *p, tableauStruct *tab) {
           eg += tab->A[row][col]*p->lb[col];
         }
       }
-      if (tab->b[row] > eh) {
+
+      if (tab->b[row] < eg) {
         p->infeasible = true;
         return;
       }
-      if (row >= tab->nRows - tab->nEqs) {
-        if (tab->b[row] < eg) {
-          p->infeasible = true;
-          return;
-        }
-      }
-      if ((eg == tab->b[row] || eh == tab->b[row]) && row >= tab->nRows - tab->nEqs) {
-        //we have a forcing constraint
-        T = transpose(tab->A);
-        for (int col=tab->A[0].size()-1; col>=0; col--) {
-          if (tab->A[row][col] != 0) {
-            //remove these variables
-            T.erase(T.begin() + col);
+      
+      if (eg == tab->b[row]) {
+        for (int col=0; col<tab->A[0].size(); col++) {
+          if (tab->A[row][col] > 0.) {
+            p->ub[col] = p->lb[col];
+          } else if (tab->A[row][col] < 0.) {
+            p->lb[col] = p->ub[col];
           }
         }
-        tab->A  = transpose(T);
-        //remove this row
         if (tab->A.size() == 0)
           return;
         tab->A.erase(tab->A.begin() + row);
@@ -1256,16 +1269,47 @@ void doPresolve(problem *p, tableauStruct *tab) {
         if (row >= tab->nRows-tab->nEqs)
           tab->nEqs--;
         tab->nRows--;
-
         //cout << "\nForcing Constraint";
 
         changed = true;
-      } else {
-        //we can do nothing. However, we can record these bounds for use later
-        h.push_back(eh);
-        g.push_back(eg);
-      }
+        continue;
+      } 
+
+      if (row >= tab->nRows - tab->nEqs) {
+        if (tab->b[row] < eg) {
+          p->infeasible = true;
+          return;
+        }
+        
+        //T = transpose(tab->A);
+        if (eh == tab->b[row]) {
+          for (int col=0; col<tab->A[0].size(); col++) {
+            if (tab->A[row][col] > 0.) {
+              p->lb[col] = p->ub[col];
+            } else if (tab->A[row][col] < 0.) {
+              p->ub[col] = p->lb[col];
+            }
+          }
+        }
+        //tab->A  = transpose(T);
+        //remove this row
+        if (tab->A.size() == 0)
+          return;
+        tab->A.erase(tab->A.begin() + row);
+        //update the nRows and nEqs
+        tab->nEqs--;
+        tab->nRows--;
+        //cout << "\nForcing Constraint";
+
+        changed = true;
+      } 
+      h.push_back(eh);
+      g.push_back(eg);
     }
+    
+    if (changed)
+      continue;
+    
 
     //Rule 4
     //fixed column
@@ -1297,20 +1341,22 @@ void doPresolve(problem *p, tableauStruct *tab) {
           break;
         }
         //check if it is implied free
-        for (int i=0; i<tab->nCols; i++) {
-          if (i != I) {
-            long double lp, up;
-            if (tab->A[R][i] != 0.) {
-              if (tab->A[R][i] > 0) {
-                lp = (tab->b[R]-h[R])/tab->A[R][i] + p->ub[i];
-                up = (tab->b[R]-g[R])/tab->A[R][i] + p->lb[i];
-              } else if (tab->A[R][i] < 0) {
-                lp = (tab->b[R]-g[R])/tab->A[R][i] + p->ub[i];
-                up = (tab->b[R]-h[R])/tab->A[R][i] + p->lb[i];
-              }
-              if (p->lb[i] <= lp && lp <= up && up <= p->ub[i]) {
-                changed = true;
-                break;
+        if (g.size() > 0) {
+          for (int i=0; i<tab->nCols; i++) {
+            if (i != I) {
+              long double lp, up;
+              if (tab->A[R][i] != 0.) {
+                if (tab->A[R][i] > 0) {
+                  lp = (tab->b[R]-h[R])/tab->A[R][i] + p->ub[i];
+                  up = (tab->b[R]-g[R])/tab->A[R][i] + p->lb[i];
+                } else if (tab->A[R][i] < 0) {
+                  lp = (tab->b[R]-g[R])/tab->A[R][i] + p->ub[i];
+                  up = (tab->b[R]-h[R])/tab->A[R][i] + p->lb[i];
+                }
+                if (p->lb[i] <= lp && lp <= up && up <= p->ub[i]) {
+                  changed = true;
+                  break;
+                }
               }
             }
           }
@@ -1323,7 +1369,7 @@ void doPresolve(problem *p, tableauStruct *tab) {
     if (changed) {
       //Add to the presolve stack
       //cout << "\nR: " << R;
-      p->presolveStack.push_back(presolveStep{type: ColumnSingleton, row: tab->A[R], b: tab->b[R], eq: false, x:0, columnIndex: I});
+      //p->presolveStack.push_back(presolveStep{type: ColumnSingleton, row: tab->A[R], b: tab->b[R], eq: false, x:0, columnIndex: I});
       //remove the Ith column
       //cout << "\nWill remove column: " << I << ": " << T[I];
       /*cout << "\n\nStart Removing column and row\nA\n";
@@ -1581,7 +1627,7 @@ void doPresolve(problem *p, tableauStruct *tab) {
             }
         }
         if (!flag)
-            likeRows.push_back(vector<int> {j});
+          likeRows.push_back(vector<int> {j});
     }
     At.clear();
     bt.clear();
@@ -1663,7 +1709,7 @@ void unzip(vector<int> &a, vector<long double> &b, vector<pair<int, int>> &zippe
 
 
 
-int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, vector<long double> b, vector<long double> c) {
+int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, vector<long double> b, vector<long double> c, int limit) {
   // A1 should be of the form <=
   // A2 shoud be of the form =
 
@@ -1692,11 +1738,13 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
   //cout << "\n\nSize of reduced costs: " << tableau->reducedCosts.size() << "\n";
   //cout << "\n\nnCols: " << tableau->nCols << "\n";
   problem *p = new problem{infeasible: false, lb: vector<long double> (tableau->nCols, -inf), ub: vector<long double> (tableau->nCols, inf)};
-  
-  doPresolve(p, tableau);
-  if (p->infeasible){
-    //cout << "\nInfeasible on Presolve";
-    return 0;
+
+  if (tableau->nRows < limit || tableau->nCols < limit) {
+    doPresolve(p, tableau);
+    if (p->infeasible){
+      //cout << "\nInfeasible on Presolve";
+      return 0;
+    }
   }
 
   /*
@@ -1978,9 +2026,9 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
 
       auto u = indSet;
 
-      bool foundPivot = false;
-      for (auto l: u) {
-        leaving = l;
+      //bool foundPivot = false;
+      //for (auto l: u) {
+        leaving = u[0];
         //get pivot col
         //they will all have the same reduced cost, so we're always going to choose the entry with the most negative value with the smallest index
         v.clear();
@@ -1993,12 +2041,12 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
           if (!isIn(i, tableau->basis) && e < 0 && !isInLd(e, v) && tableau->b[leaving]/e <= p->ub[i]) {
             indSet.push_back(i);
             v.push_back(e);
-            foundPivot = true;
+            //foundPivot = true;
           }
         }
-        if (foundPivot)
-          break;
-      }
+        //if (foundPivot)
+        //  break;
+      //}
 
       //if (tableau->status=="failure")
       //  break;
@@ -2044,21 +2092,28 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
       its++;
     } 
   } else {
+    delete p;
+    delete tableau;
     return 6;
   }
   //if (!canImproveDual(tableau))
   //  cout << "\nCAN'T IMPROVE\n";
 
+  delete p;
+
   for (int i=0; i<tableau->b.size(); i++) {
     //cout << "\nb" << i << " :\t" << tableau->b[i];
-    if (tableau->b[i] < 0)
+    if (tableau->b[i] < 0) {
+      delete tableau;
       return 0;
+    }
   }
 
   for (auto e: tableau->b)
-    if (e - floor(e) != 0.)
+    if (e - floor(e) != 0.) {
+      delete tableau;
       return 7;
-  
+    }
   //make sure reduced costs are all viable
   /*cout << "\nReduced Costs: " << tableau->reducedCosts;
   for (auto e: tableau->reducedCosts)
@@ -2094,11 +2149,11 @@ int dualSimplex(vector<vector<long double>> A1, vector<vector<long double>> A2, 
   //auto s = getSplitSolution(tableau);
   //auto r = isPrimalFeasible(p, tableau, s, A1o, A2o, bo, nVars);
   //auto r = optimalityCheck(p, tableau, s);
-
+  delete tableau;
   return 1;
 }
 
-/*
+
 HighsModel makeModel(IP *tc, bool isInt) {
   //make a highs model with A, b taken from cases[id]
   HighsModel model;
@@ -2127,7 +2182,7 @@ HighsModel makeModel(IP *tc, bool isInt) {
   for (auto row: tc->ineqs)
     cout << row;
   */
- /*
+
   model.lp_.col_lower_ = vector<double> (tc->nVars, -1.0e30);
   model.lp_.col_upper_ = vector<double> (tc->nVars, 1.0e30);
   model.lp_.col_cost_ = vector<double> (tc->nVars, 0.0);
@@ -2199,9 +2254,8 @@ HighsModel makeModel(IP *tc, bool isInt) {
 
   return model;
 }
-*/
 
-/*
+
 int getPresolve(IP *ip, bool isInt) {
   //presolve the model using highs
   HighsModel model = makeModel(ip, isInt);
@@ -2212,7 +2266,8 @@ int getPresolve(IP *ip, bool isInt) {
   //0x2FFF this is just the aggregator and the basic rules
   //11001110111111
   //00110101000000 = 0xC40
-  highs.setOptionValue("presolve_rule_off", 0x3DBF);
+  //0x3DBF
+  highs.setOptionValue("presolve_rule_off", 0x0);
   highs.presolve();
   const HighsPresolveStatus& model_status = highs.getModelPresolveStatus();
   ip->presolveCols = model.lp_.num_col_;
@@ -2225,10 +2280,9 @@ int getPresolve(IP *ip, bool isInt) {
 
   return model_status == HighsPresolveStatus::kReducedToEmpty;
 }
-*/
+
 
 int main() {
-  clock_t tStart = clock();
   // vector<size_t> hashKeys;
   //vector<int> uniqueProblems;
 
@@ -2442,210 +2496,216 @@ int main() {
   vector<long double> c = {7., 6., 0., 0., 0.};
   cout << "\n\nIS IT WORKING? SHOULD BE 32!!!    " << simplex(c, A, b, 2) << "\n\n";
   */
-  
-  //Test the dual simplex
-  int infeasible = 0;
-  int working = 0;
-  int incorrect = 0;
-  int failed = 0;
-  int methodFails = 0;
-  int artInBasis = 0;
-  int trivFea = 0;
-  int trivInf = 0;
-  int highsInf = 0;
-  int highsFea = 0;
-  int disagree = 0;
-  int gap = 0;
-  int empty = 0;
-  int mineEmpty = 0;
-  int integer = 0;
-  for (int ind=0; ind<nCases; ind++){
-    /*
-    cout << "\n \t IND:: " << ind << "\n";
-    cout << "\n";
-    cout << cases[ind].nVars << "\n";
-    cout << cases[ind].nIneqs << "\n";
-    cout << cases[ind].ineqs << "\n";
-    cout << cases[ind].nEqs << "\n";
-    cout << cases[ind].eqs << "\n";
-    */
 
-    // See what the highs solver finds
-    /*
-    auto primal = makeModel(&cases[ind], false);
-    Highs highs;
-    HighsStatus return_status;
-    return_status = highs.passModel(primal);
-    assert(return_status==HighsStatus::kOk);
-    const HighsLp& lp = highs.getLp();
-    return_status = highs.run();
-    assert(return_status==HighsStatus::kOk);
-    const HighsModelStatus& model_status = highs.getModelStatus();
-    //assert(model_status==HighsModelStatus::kUnbounded);
-    const HighsInfo& info = highs.getInfo();
-    if (model_status == HighsModelStatus::kInfeasible)
-      highsInf++;
-    if (model_status == HighsModelStatus::kOptimal || model_status == HighsModelStatus::kModelEmpty)
-      highsFea++;
-    if (model_status == HighsModelStatus::kModelEmpty)
-      empty++;
-    */
+  for (int limit = 0; limit < 40; limit++) {
+    clock_t tStart = clock();
+    //Test the dual simplex
+    int binLim = 0;
+    int infeasible = 0;
+    int working = 0;
+    int incorrect = 0;
+    int failed = 0;
+    int methodFails = 0;
+    int artInBasis = 0;
+    int trivFea = 0;
+    int trivInf = 0;
+    int highsInf = 0;
+    int highsFea = 0;
+    int disagree = 0;
+    int gap = 0;
+    int empty = 0;
+    int mineEmpty = 0;
+    int integer = 0;
+    for (int ind=0; ind<nCases; ind++){
+      if (cases[ind].nEqs + cases[ind].nIneqs <= limit || cases[ind].nVars <= limit)
+        binLim++;
+      /*
+      cout << "\n \t IND:: " << ind << "\n";
+      cout << "\n";
+      cout << cases[ind].nVars << "\n";
+      cout << cases[ind].nIneqs << "\n";
+      cout << cases[ind].ineqs << "\n";
+      cout << cases[ind].nEqs << "\n";
+      cout << cases[ind].eqs << "\n";
+      */
 
-    /*  code to count the trivially feasible cases
-    bool triviallyFeasible = true;
-    //check if inequalities are valid
-    for (int i=1; i<cases[ind].nIneqs; i++)
-      if (0 > -cases[ind].ineqs[i][0])
-        triviallyFeasible = false;
-    //check if the equalities are valid
-    long double eps = 0.000001;
-    for (int i=0; i<cases[ind].nEqs; i++)
-      if (0 < -cases[ind].eqs[i][0] - eps ||  0 > -cases[ind].eqs[i][0] + eps)
-        triviallyFeasible = false;
-    if (triviallyFeasible) {
-      working++;
-      trivFea++;
-      continue;
-    }
-    */
+      // See what the highs solver finds
+      /*
+      auto primal = makeModel(&cases[ind], false);
+      Highs highs;
+      HighsStatus return_status;
+      return_status = highs.passModel(primal);
+      assert(return_status==HighsStatus::kOk);
+      const HighsLp& lp = highs.getLp();
+      return_status = highs.run();
+      assert(return_status==HighsStatus::kOk);
+      const HighsModelStatus& model_status = highs.getModelStatus();
+      //assert(model_status==HighsModelStatus::kUnbounded);
+      const HighsInfo& info = highs.getInfo();
+      if (model_status == HighsModelStatus::kInfeasible)
+        highsInf++;
+      if (model_status == HighsModelStatus::kOptimal || model_status == HighsModelStatus::kModelEmpty)
+        highsFea++;
+      if (model_status == HighsModelStatus::kModelEmpty)
+        empty++;
+      */
 
-   /*  code to count the trivially infeasible cases
+      /*  code to count the trivially feasible cases
+      bool triviallyFeasible = true;
+      //check if inequalities are valid
+      for (int i=1; i<cases[ind].nIneqs; i++)
+        if (0 > -cases[ind].ineqs[i][0])
+          triviallyFeasible = false;
+      //check if the equalities are valid
+      long double eps = 0.000001;
+      for (int i=0; i<cases[ind].nEqs; i++)
+        if (0 < -cases[ind].eqs[i][0] - eps ||  0 > -cases[ind].eqs[i][0] + eps)
+          triviallyFeasible = false;
+      if (triviallyFeasible) {
+        working++;
+        trivFea++;
+        continue;
+      }
+      */
 
-    bool triviallyInfeasible = false;
-    for (auto eq: cases[ind].ineqs) {
-      bool nonZero = false;
-      if (eq[0] > 0) {
-        for (int i=1; i<cases[ind].nVars; i++) {
-          if (eq[i] != 0)
-            nonZero = true;
-        }
-        if (!nonZero) {
-          triviallyInfeasible = true;
-          break;
+    /*  code to count the trivially infeasible cases
+
+      bool triviallyInfeasible = false;
+      for (auto eq: cases[ind].ineqs) {
+        bool nonZero = false;
+        if (eq[0] > 0) {
+          for (int i=1; i<cases[ind].nVars; i++) {
+            if (eq[i] != 0)
+              nonZero = true;
+          }
+          if (!nonZero) {
+            triviallyInfeasible = true;
+            break;
+          }
         }
       }
-    }
-    for (auto eq: cases[ind].eqs) {
-      bool nonZero = false;
-      if (eq[0] != 0) {
-        for (int i=1; i<cases[ind].nVars; i++) {
-          if (eq[i] != 0)
-            nonZero = true;
-        }
-        if (!nonZero) {
-          triviallyInfeasible = true;
-          break;
+      for (auto eq: cases[ind].eqs) {
+        bool nonZero = false;
+        if (eq[0] != 0) {
+          for (int i=1; i<cases[ind].nVars; i++) {
+            if (eq[i] != 0)
+              nonZero = true;
+          }
+          if (!nonZero) {
+            triviallyInfeasible = true;
+            break;
+          }
         }
       }
+
+
+    if (triviallyInfeasible) {
+        infeasible++;
+        trivInf++;
+        continue;
     }
+    */
 
+      if (cases[ind].nVars == 1) {
+        infeasible++;
+        trivInf++;
+        continue;
+      }
 
-   if (triviallyInfeasible) {
-      infeasible++;
-      trivInf++;
-      continue;
-   }
-   */
+      if (cases[ind].nEqs==0 && cases[ind].nIneqs==0) {
+        working++;
+        continue;
+      }
 
-    if (cases[ind].nVars == 1) {
-      infeasible++;
-      trivInf++;
-      continue;
-    }
+      vector<vector<long double>> A1;
+      vector<vector<long double>> A2;
+      vector<long double> b;
+      vector<long double> b2;
+      tie(A1, b) = extractAb(cases[ind].ineqs);
+      tie(A2, b2) = extractAb(cases[ind].eqs);
+      b.insert(b.end(), b2.begin(), b2.end()); 
 
-    if (cases[ind].nEqs==0 && cases[ind].nIneqs==0) {
-      working++;
-      continue;
-    }
-
-    vector<vector<long double>> A1;
-    vector<vector<long double>> A2;
-    vector<long double> b;
-    vector<long double> b2;
-    tie(A1, b) = extractAb(cases[ind].ineqs);
-    tie(A2, b2) = extractAb(cases[ind].eqs);
-    b.insert(b.end(), b2.begin(), b2.end()); 
-
-    auto x = dualSimplex(A1, A2, b, vector<long double>(cases[ind].nVars, 0.));
-    switch (x) {
-    case (0):
-      infeasible++;
-    break;
-    case (1):
-      working++;
-    break;
-    case (2):
-      failed++;
-    break;
-    case (3):
-      incorrect++;
-    break;
-    case (4):
-      methodFails++;
-    break;
-    case (5):
-      artInBasis++;
-    break;
-    case (6):
-      mineEmpty++;
-    break;
-    case (7):
-      integer++;
-    break;
-    }
+      auto x = dualSimplex(A1, A2, b, vector<long double>(cases[ind].nVars, 0.), limit);
+      switch (x) {
+      case (0):
+        infeasible++;
+      break;
+      case (1):
+        working++;
+      break;
+      case (2):
+        failed++;
+      break;
+      case (3):
+        incorrect++;
+      break;
+      case (4):
+        methodFails++;
+      break;
+      case (5):
+        artInBasis++;
+      break;
+      case (6):
+        mineEmpty++;
+      break;
+      case (7):
+        integer++;
+      break;
+      }
     
 
-    /*
-    cout << "\n\ninfeasible: " << infeasible << "\tHighs Infeasible: " << highsInf;
-    cout << "\nWorking: " << working << "\tHighs Solved to Optimality: " << highsFea;
-    cout << "\nIncorrect: " << incorrect << "\tHighs reduced to Empty: " << empty;
-    cout << "\nMethod Fails: " << methodFails;
-    cout << "\nArtificial Variable in the Basis: " << artInBasis;
-    cout << "\nfailed: " << failed << "\n";
-    cout << "\nEmpty: " << mineEmpty + trivFea << "\n";
+      /*
+      cout << "\n\ninfeasible: " << infeasible << "\tHighs Infeasible: " << highsInf;
+      cout << "\nWorking: " << working << "\tHighs Solved to Optimality: " << highsFea;
+      cout << "\nIncorrect: " << incorrect << "\tHighs reduced to Empty: " << empty;
+      cout << "\nMethod Fails: " << methodFails;
+      cout << "\nArtificial Variable in the Basis: " << artInBasis;
+      cout << "\nfailed: " << failed << "\n";
+      cout << "\nEmpty: " << mineEmpty + trivFea << "\n";
 
-    cout << "\n\nHighs Disagrees With my dual simplex: " << disagree << " times\n";
+      cout << "\n\nHighs Disagrees With my dual simplex: " << disagree << " times\n";
 
-    cout << "\nTrivially Feasible: " << trivFea << "\n";
-    */
+      cout << "\nTrivially Feasible: " << trivFea << "\n";
+      */
 
-    /*
-    bool c = getPresolve(&cases[ind], false);
-    if (x == 6 && !c && cases[ind].nEqs + cases[ind].nIneqs > 1) {
-      cout << "\n\nGOES WRONG SOMEWHERE highs: nonEmpty, mine: empty\n\n";
-      //cin.clear();
-      //cin.get();
-        if (!((model_status == HighsModelStatus::kOptimal || model_status == HighsModelStatus::kModelEmpty))) {
+      /*
+      bool c = getPresolve(&cases[ind], false);
+      if (x == 6 && !c && cases[ind].nEqs + cases[ind].nIneqs > 1) {
+        cout << "\n\nGOES WRONG SOMEWHERE highs: nonEmpty, mine: empty\n\n";
+        //cin.clear();
+        //cin.get();
+          if (!((model_status == HighsModelStatus::kOptimal || model_status == HighsModelStatus::kModelEmpty))) {
+            cout << "\n\nGOES WRONG SOMEWHERE highs: optimal, mine: infeasible\n\n";
+            cin.clear();
+            cin.get();
+            disagree++;
+        }
+      }
+      */
+      /*
+      if ((model_status == HighsModelStatus::kOptimal || model_status == HighsModelStatus::kModelEmpty) && x == 0) {
           cout << "\n\nGOES WRONG SOMEWHERE highs: optimal, mine: infeasible\n\n";
+          cin.clear();
+          cin.get();
+          cin.get();
+          cin.clear();
+          disagree++;
+      }
+      */
+      /*
+      if (model_status == HighsModelStatus::kInfeasible && x == 1) {
+          cout << "\n\nGOES WRONG SOMEWHERE highs: infeasible, mine: feasible\n\n";
           cin.clear();
           cin.get();
           disagree++;
       }
-    }
-    */
-    /*
-    if ((model_status == HighsModelStatus::kOptimal || model_status == HighsModelStatus::kModelEmpty) && x == 0) {
-        cout << "\n\nGOES WRONG SOMEWHERE highs: optimal, mine: infeasible\n\n";
-        cin.clear();
-        cin.get();
-        cin.get();
-        cin.clear();
-        disagree++;
-    }
-    */
-    /* 
-    if ((model_status == HighsModelStatus::kInfeasible && x == 1) || (model_status == HighsModelStatus::kInfeasible && x == 6)) {
-        cout << "\n\nGOES WRONG SOMEWHERE highs: infeasible, mine: feasible\n\n";
-        cin.clear();
-        cin.get();
-        disagree++;
-    }
-    */
-    
-    //cin.clear();
-    //cin.get();
-    //cin.clear();
+      */
+      //cin.clear();
+      //cin.get();
+      //cin.clear();
 
+    }
+    cout << "\n" << binLim << " " << infeasible <<  " " << mineEmpty << " " <<  mineEmpty + integer <<  " " << mineEmpty + integer + working << " " << ((double)(clock() - tStart)/CLOCKS_PER_SEC);
   }
 
 
@@ -2653,6 +2713,7 @@ int main() {
   //cout  << "\n\n" << "Ints reduced to empty:" << "\t\t" << emptyCountInt << "\n\n";
   //cout << "\n\n" << "Both reduced to empty:" << "\t\t" << both;
 
+  /*
   cout << "\n\ninfeasible: " << infeasible << "\tHighs Infeasible: " << highsInf;
   cout << "\nWorking: " << working << "\tHighs Solved to Optimality: " << highsFea;
   cout << "\nIncorrect: " << incorrect << "\tHighs reduced to Empty: " << empty;
@@ -2667,9 +2728,8 @@ int main() {
   cout << "\nTrivially Feasible: " << trivFea << "\n";
 
   cout << "\nTIME\n";
-  printf("Time taken: %.2fs\n", (double)(clock() - tStart)/CLOCKS_PER_SEC);
-
-
+  */
+  //cout << "Empty: " << mineEmpty << " Int: " << integer << " Working: " << working << " inf: " << infeasible <<"\t";
   /*
   // Test case for the dual simplex, it works
   vector<vector<long double>> A = {{-3, -5}, {-5, -2}};
